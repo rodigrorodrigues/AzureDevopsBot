@@ -74,6 +74,4 @@ Os logs das operações são salvos em um arquivo de log para monitoramento e de
 ---
 
 Sinta-se à vontade para contribuir ou relatar problemas no repositório.
-```
 
-Você pode criar este arquivo diretamente no repositório. Se precisar de mais alguma coisa, estou à disposição!
