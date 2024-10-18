@@ -18,6 +18,7 @@ Funcionamento:
 - Salva logs das operações em um arquivo de log.
 """
 
+import logging
 import discord
 import asyncio
 import pickle
@@ -29,32 +30,21 @@ from msrest.authentication import BasicAuthentication
 import os
 import sys
 
-DISCORD_TOKEN = 'COLOQUE SEU TOKEN AQUI'
-DISCORD_CHANNEL_ID = COLOQUE O ID DO CANAL AQUI
-AZURE_ORGANIZATION_URL = 'https://dev.azure.com/SUA_ORGANIZACAO/'
-AZURE_PROJECT = 'NOME_DO_PROJETO'
-AZURE_TEAM = 'NOME_DA_EQUIPE'
-AZURE_PAT = 'COLOQUE SEU PAT AQUI'
+DISCORD_TOKEN = 'SEU_DISCORD_TOKEN'
+DISCORD_CHANNEL_ID = 'SEU_Channel_ID'
+AZURE_ORGANIZATION_URL = 'https://dev.azure.com/sua_organizacao/'
+AZURE_PROJECT = 'Seu_Projeto'
+AZURE_TEAM = 'Seu_Time'
+AZURE_PAT = 'SEU_PAT'
 CACHE_FILE = 'notified_work_items.pkl'
-ROLE_ID = COLOQUE O ID DO CARGO AQUI PARA MENCIONAR EM CASO DE MUDANÇA DE STATUS PARA "Testing"
+ROLE_ID = 'SEU_ROLE_ID'
 LOG_FILE = 'bot_log.txt'
 
-class Tee:
-    def __init__(self, *files):
-        self.files = files
-
-    def write(self, obj):
-        for f in self.files:
-            f.write(obj)
-            f.flush()
-
-    def flush(self):
-        for f in self.files:
-            f.flush()
-
-log_file = open(LOG_FILE, 'a', encoding='utf-8')
-sys.stdout = Tee(sys.stdout, log_file)
-sys.stderr = Tee(sys.stderr, log_file)
+# Configuração do logger
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s', handlers=[
+    logging.FileHandler(LOG_FILE, 'a', 'utf-8'),
+    logging.StreamHandler(sys.stdout)
+])
 
 credentials = BasicAuthentication('', AZURE_PAT)
 connection = Connection(base_url=AZURE_ORGANIZATION_URL, creds=credentials)
@@ -90,12 +80,12 @@ class SprintUpdatesBot(discord.Client):
         self.last_checked = datetime.now(timezone.utc)
 
     async def on_ready(self):
-        print(f'Bot conectado como {self.user}!')
+        logging.info(f'Bot conectado como {self.user}!')
         self.channel = self.get_channel(DISCORD_CHANNEL_ID)
         if self.channel is None:
-            print(f'Erro: Canal com ID {DISCORD_CHANNEL_ID} não encontrado.')
+            logging.error(f'Erro: Canal com ID {DISCORD_CHANNEL_ID} não encontrado.')
         else:
-            print(f'Canal encontrado: {self.channel.name}')
+            logging.info(f'Canal encontrado: {self.channel.name}')
             self.loop.create_task(self.check_updates())
 
     async def check_updates(self):
@@ -105,12 +95,12 @@ class SprintUpdatesBot(discord.Client):
                 iterations = work_client.get_team_iterations(team_context, 'current')
                 
                 if not iterations:
-                    print("Nenhuma iteração atual encontrada.")
+                    logging.warning("Nenhuma iteração atual encontrada.")
                     await asyncio.sleep(60)
                     continue
                 
                 current_iteration = iterations[0]
-                print(f'Iteração atual: {current_iteration.name}')
+                logging.info(f'Iteração atual: {current_iteration.name}')
                 
                 query = Wiql(query=f"""
                     SELECT [System.Id], [System.Title], [System.State], [System.CreatedDate], [System.ChangedDate]
@@ -121,82 +111,112 @@ class SprintUpdatesBot(discord.Client):
                 result = wit_client.query_by_wiql(query)
                 
                 if not result.work_items:
-                    print("Nenhum item de trabalho atualizado encontrado.")
+                    logging.info("Nenhum item de trabalho atualizado encontrado.")
                 
                 for work_item in result.work_items:
-                    print(f"Verificando item de trabalho: {work_item.id}")
+                    logging.info(f"Verificando item de trabalho: {work_item.id}")
                     item = wit_client.get_work_item(work_item.id, expand='all')
                     
-                    try:
-                        created_date = datetime.strptime(item.fields["System.CreatedDate"], "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
-                    except ValueError:
-                        created_date = datetime.strptime(item.fields["System.CreatedDate"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                    created_date = self.parse_date(item.fields["System.CreatedDate"])
+                    changed_date = self.parse_date(item.fields["System.ChangedDate"])
                     
-                    try:
-                        changed_date = datetime.strptime(item.fields["System.ChangedDate"], "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
-                    except ValueError:
-                        changed_date = datetime.strptime(item.fields["System.ChangedDate"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-                    
-                    print(f"Item de trabalho encontrado: {item.fields['System.Title']} - Estado: {item.fields['System.State']} - Data de criação: {created_date} - Data de alteração: {changed_date}")
+                    logging.info(f"Item de trabalho encontrado: {item.fields['System.Title']} - Estado: {item.fields['System.State']} - Data de criação: {created_date} - Data de alteração: {changed_date}")
                     
                     if created_date > self.last_checked:
-                        message = (
-                            f'ㅤ\n **Sprint Atual:** {current_iteration.name}\n'
-                            f'‼ **Novo Work Item Criado:** {item.fields["System.Title"]}\n'
-                            f'**Status:** {state_emojis.get(item.fields["System.State"], "")} {item.fields["System.State"]} \n\nㅤ'
-                        )
-                        print(f"Enviando notificação para o Discord: {message}")
-                        await self.channel.send(message)
+                        await self.notify_new_work_item(current_iteration, item)
                         self.notified_work_items.add(work_item.id)
                     
                     elif changed_date > self.last_checked:
-                        revisions = wit_client.get_revisions(work_item.id)
-                        if len(revisions) > 1:
-                            previous_revision = revisions[-2]
-                            previous_state = previous_revision.fields["System.State"]
-                        else:
-                            previous_state = "N/A"
-                        
-                        previous_state_emoji = state_emojis.get(previous_state, "")
-                        current_state_emoji = state_emojis.get(item.fields["System.State"], "")
-                        
-                        if previous_state != item.fields["System.State"]:
-                            message = (
-                                f'ㅤ\n **Sprint Atual:** {current_iteration.name}\n'
-                                f'📢 **Alteração de Status do Item:** {item.fields["System.Title"]}\n'
-                                f'**Status:** {previous_state_emoji} {previous_state} > {current_state_emoji} {item.fields["System.State"]} \nㅤ'
-                            )
-                            
-                            if item.fields["System.State"] == "Testing":
-                                message += f'<@&{ROLE_ID}> 🙋‍♂️\nㅤ'
-                        else:
-                            message = (
-                                f'ㅤ\n **Sprint Atual:** {current_iteration.name}\n'
-                                f'✍ **Edição do Item:** {item.fields["System.Title"]}\n'
-                                f'**Status:** {current_state_emoji} {item.fields["System.State"]} \n\nㅤ'
-                            )
-                        
-                        print(f"Enviando notificação para o Discord: {message}")
-                        await self.channel.send(message)
-                        self.notified_work_items.add(work_item.id)
+                        await self.notify_updated_work_item(current_iteration, item, work_item.id)
                     
-                if 'System.History' in item.fields:
-                    history = item.fields['System.History']
-                    history_date = changed_date
-                    if history_date > self.last_checked:
-                        print(f"Novo comentário encontrado")
-                        await self.channel.send(
-                            f'ㅤ\n **Sprint Atual:** {current_iteration.name}\n'
-                            f'📩 **Novo comentário em** {item.fields["System.Title"]}\nㅤ' 
-                        )
-                
+                    await self.check_comments(item, work_item.id)
+                    
                 self.last_checked = datetime.now(timezone.utc)
                 save_cache(self.notified_work_items)
                 
             except Exception as e:
-                print(f'Erro ao obter atualizações: {e}')
+                logging.error(f'Erro ao obter atualizações: {e}')
             
-            await asyncio.sleep(10)
+            await asyncio.sleep(300)
+
+    def parse_date(self, date_str):
+        if isinstance(date_str, datetime):
+            return date_str
+        try:
+            return datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+    async def notify_new_work_item(self, current_iteration, item):
+        embed = discord.Embed(
+            title="‼ Novo Work Item Criado",
+            description=f"**Sprint Atual:** {current_iteration.name}",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="Título", value=item.fields["System.Title"], inline=False)
+        embed.add_field(name="Status", value=f'{state_emojis.get(item.fields["System.State"], "")} {item.fields["System.State"]}', inline=True)
+        
+        logging.info(f"Enviando notificação para o Discord: {embed.to_dict()}")
+        await self.channel.send(embed=embed)
+
+    async def notify_updated_work_item(self, current_iteration, item, work_item_id):
+        revisions = wit_client.get_revisions(work_item_id)
+        if len(revisions) > 1:
+            previous_revision = revisions[-2]
+            previous_state = previous_revision.fields["System.State"]
+        else:
+            previous_state = "N/A"
+        
+        previous_state_emoji = state_emojis.get(previous_state, "")
+        current_state_emoji = state_emojis.get(item.fields["System.State"], "")
+        
+        if previous_state != item.fields["System.State"]:
+            embed = discord.Embed(
+                title="📢 Alteração de Status do Item",
+                description=f"**Sprint Atual:** {current_iteration.name}",
+                color=discord.Color.blue()
+            )
+            embed.add_field(name="Título", value=item.fields["System.Title"], inline=False)
+            embed.add_field(name="Status", value=f'{previous_state_emoji} {previous_state} > {current_state_emoji} {item.fields["System.State"]}', inline=True)
+  
+            
+            if item.fields["System.State"] == "Testing":
+                embed.add_field(name="Ação Requerida", value=f'<@&{ROLE_ID}> 🙋‍♂️', inline=False)
+        else:
+            embed = discord.Embed(
+                title="✍ Edição do Item",
+                description=f"**Sprint Atual:** {current_iteration.name}",
+                color=discord.Color.orange()
+            )
+            embed.add_field(name="Título", value=item.fields["System.Title"], inline=False)
+            embed.add_field(name="Status", value=f'{current_state_emoji} {item.fields["System.State"]}', inline=True)
+  
+        
+        logging.info(f"Enviando notificação para o Discord: {embed.to_dict()}")
+        await self.channel.send(embed=embed)
+
+    async def check_comments(self, item, work_item_id):
+        try:
+            comments = wit_client.get_comments(project=AZURE_PROJECT, work_item_id=work_item_id)
+            for comment in comments.comments:
+                comment_date = self.parse_date(comment.created_date)
+                if comment_date > self.last_checked:
+                    await self.notify_new_comment(item, comment)
+        except Exception as e:
+            logging.error(f'Erro ao obter comentários: {e}')
+
+    async def notify_new_comment(self, item, comment):
+        embed = discord.Embed(
+            title="💬 Novo Comentário",
+            description=f"**Item:** {item.fields['System.Title']}",
+            color=discord.Color.purple()
+        )
+        embed.add_field(name="Comentário", value=comment.text, inline=False)
+        embed.add_field(name="Autor", value=comment.revised_by.display_name, inline=True)
+        embed.add_field(name="Data", value=comment.created_date, inline=True)
+        
+        logging.info(f"Enviando notificação para o Discord: {embed.to_dict()}")
+        await self.channel.send(embed=embed)
 
 intents = discord.Intents.default()
 intents.presences = True
