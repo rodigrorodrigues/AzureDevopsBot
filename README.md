@@ -1,6 +1,6 @@
 # Azure DevOps Discord Bot
 
-Este script implementa um bot do Discord que monitora atualizações de work items no Azure DevOps. Ele notifica um canal do Discord sobre a criação de novos work items, mudanças de estado e novos comentários.
+Bot do Discord que monitora atualizações de work items no Azure DevOps. Ele notifica um canal do Discord sobre a criação de novos work items, mudanças de estado e novos comentários.
 
 ## Dependências
 
